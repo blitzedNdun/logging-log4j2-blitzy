@@ -96,6 +96,13 @@ public class Interpolator extends AbstractConfigurationAwareLookup {
      */
     public Interpolator(final Map<String, String> properties) {
         this.defaultLookup = new MapLookup(properties == null ? new HashMap<String, String>() : properties);
+        
+        // Security check: Ensure JNDI is disabled by default
+        final String disableJndi = System.getProperty("log4j2.disable.jndi", "true");
+        if (!"false".equals(disableJndi)) {
+            LOGGER.info("JNDI lookups are disabled by system property log4j2.disable.jndi={}", disableJndi);
+        }
+        
         // TODO: this ought to use the PluginManager
         strLookupMap.put("log4j", new Log4jLookup());
         strLookupMap.put("sys", new SystemPropertiesLookup());
@@ -105,14 +112,12 @@ public class Interpolator extends AbstractConfigurationAwareLookup {
         strLookupMap.put("java", new JavaLookup());
         strLookupMap.put("lower", new LowerLookup());
         strLookupMap.put("upper", new UpperLookup());
-        // JNDI
-        try {
-            // [LOG4J2-703] We might be on Android
-            strLookupMap.put(LOOKUP_KEY_JNDI,
-                Loader.newCheckedInstanceOf("org.apache.logging.log4j.core.lookup.JndiLookup", StrLookup.class));
-        } catch (final LinkageError | Exception e) {
-            handleError(LOOKUP_KEY_JNDI, e);
-        }
+        // JNDI - DISABLED FOR SECURITY
+        // JNDI lookup functionality has been completely removed to prevent JNDI injection vulnerabilities
+        // This is a fail-safe security measure to block any JNDI-based variable substitution
+        LOGGER.warn("JNDI lookup functionality has been permanently disabled for security. " +
+                   "JNDI lookups have been removed to prevent remote code execution vulnerabilities.");
+        // Do not register any JNDI lookup - leave this section empty for security
         // JMX input args
         try {
             // We might be on Android
