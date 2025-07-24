@@ -8,7 +8,7 @@ Only the most recent release of Apache Log4j 2 is supported.
 
 ### Security Hardening - JNDI Lookup Removal
 
-As a critical security hardening measure, **JNDI lookup functionality has been completely removed** from the log4j-core module to prevent remote code execution vulnerabilities. This change eliminates the ability for attackers to trigger malicious JNDI lookups through log message patterns.
+As a critical security hardening measure, **JNDI functionality has been completely removed** from the log4j-core module to prevent remote code execution vulnerabilities. This comprehensive removal eliminates the ability for attackers to trigger malicious JNDI lookups through log message patterns, ensuring complete protection against JNDI-based attacks.
 
 ### Technical Implementation
 
