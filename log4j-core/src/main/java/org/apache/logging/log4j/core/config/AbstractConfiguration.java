@@ -81,6 +81,17 @@ public abstract class AbstractConfiguration extends AbstractFilterable implement
     private static final int BUF_SIZE = 16384;
 
     /**
+     * System property to disable JNDI lookups for security hardening.
+     * When set to "true", prevents JNDI variable substitution that could lead to remote code execution.
+     */
+    private static final String JNDI_DISABLE_PROPERTY = "log4j2.disable.jndi";
+    
+    /**
+     * Default value for JNDI disable flag - true for fail-safe security.
+     */
+    private static final boolean JNDI_DISABLE_DEFAULT = true;
+
+    /**
      * The root node of the configuration.
      */
     protected Node rootNode;
@@ -126,8 +137,24 @@ public abstract class AbstractConfiguration extends AbstractFilterable implement
     private ConcurrentMap<String, LoggerConfig> loggerConfigs = new ConcurrentHashMap<>();
     private List<CustomLevelConfig> customLevels = Collections.emptyList();
     private final ConcurrentMap<String, String> propertyMap = new ConcurrentHashMap<>();
-    private final StrLookup tempLookup = new Interpolator(propertyMap);
-    private final StrSubstitutor subst = new StrSubstitutor(tempLookup);
+    
+    /**
+     * Flag indicating whether JNDI lookups are disabled for security.
+     */
+    private final boolean jndiDisabled;
+    
+    /**
+     * Temporary lookup instance created during configuration initialization.
+     * Uses JNDI-aware Interpolator based on security settings.
+     */
+    private final StrLookup tempLookup;
+    
+    /**
+     * String substitutor for property replacement.
+     * Configured with JNDI-aware lookup based on security settings.
+     */
+    private final StrSubstitutor subst;
+    
     private LoggerConfig root = new LoggerConfig();
     private final ConcurrentMap<String, Object> componentMap = new ConcurrentHashMap<>();
     private final ConfigurationSource configurationSource;
@@ -145,11 +172,156 @@ public abstract class AbstractConfiguration extends AbstractFilterable implement
         // The loggerContext is null for the NullConfiguration class.
         // this.loggerContext = new WeakReference(Objects.requireNonNull(loggerContext, "loggerContext is null"));
         this.configurationSource = Objects.requireNonNull(configurationSource, "configurationSource is null");
+        
+        // Initialize JNDI disable state from system property for security hardening
+        this.jndiDisabled = checkJndiDisabledProperty();
+        
+        if (jndiDisabled) {
+            LOGGER.info("JNDI lookups are DISABLED for security hardening. System property {}=true", JNDI_DISABLE_PROPERTY);
+        } else {
+            LOGGER.warn("JNDI lookups are ENABLED - this may pose a security risk due to potential remote code execution. " +
+                       "Consider setting {}=true for security hardening", JNDI_DISABLE_PROPERTY);
+        }
+        
+        // Create JNDI-aware lookup and substitutor instances
+        this.tempLookup = createJndiAwareInterpolator(propertyMap);
+        this.subst = new StrSubstitutor(tempLookup);
+        
         componentMap.put(Configuration.CONTEXT_PROPERTIES, propertyMap);
         pluginManager = new PluginManager(Node.CATEGORY);
         rootNode = new Node();
         setState(State.INITIALIZING);
 
+    }
+
+    /**
+     * Checks if JNDI lookups should be disabled based on system property.
+     * 
+     * @return true if JNDI lookups should be disabled for security, false otherwise
+     */
+    private boolean checkJndiDisabledProperty() {
+        return PropertiesUtil.getProperties().getBooleanProperty(JNDI_DISABLE_PROPERTY, JNDI_DISABLE_DEFAULT);
+    }
+    
+    /**
+     * Creates a JNDI-aware Interpolator instance that respects the JNDI disable flag.
+     * When JNDI is disabled, the Interpolator is configured to prevent JNDI lookup resolution.
+     * 
+     * @param properties the property map for the Interpolator
+     * @return a new Interpolator instance configured based on JNDI security settings
+     */
+    private StrLookup createJndiAwareInterpolator(final Map<String, String> properties) {
+        if (jndiDisabled) {
+            LOGGER.debug("JNDI lookups are disabled due to security policy ({}=true)", JNDI_DISABLE_PROPERTY);
+            // Create Interpolator with only MapLookup, excluding JNDI for security
+            final StrLookup mapLookup = properties == null ? null : new MapLookup(properties);
+            // Create Interpolator with empty plugin packages to prevent JNDI lookup registration
+            return new Interpolator(mapLookup, new ArrayList<String>());
+        } else {
+            LOGGER.warn("JNDI lookups are enabled - this may pose a security risk. " +
+                       "Consider setting {}=true for security hardening", JNDI_DISABLE_PROPERTY);
+            return new Interpolator(properties);
+        }
+    }
+
+    /**
+     * Returns whether JNDI lookups are disabled in this configuration.
+     * 
+     * @return true if JNDI lookups are disabled for security, false otherwise
+     */
+    public boolean isJndiDisabled() {
+        return jndiDisabled;
+    }
+
+    /**
+     * Collects plugins while respecting JNDI security settings.
+     * When JNDI is disabled, excludes JNDI-related plugins from registration.
+     */
+    private void collectPluginsWithJndiAwareness() {
+        pluginManager.collectPlugins(pluginPackages);
+        
+        if (jndiDisabled) {
+            // Remove JNDI-related plugins for security hardening
+            final Map<String, PluginType<?>> plugins = pluginManager.getPlugins();
+            if (plugins != null) {
+                // Filter out JndiLookup plugin to prevent JNDI variable substitution
+                final PluginType<?> jndiPlugin = plugins.remove("jndi");
+                if (jndiPlugin != null) {
+                    LOGGER.debug("Removed JNDI lookup plugin for security hardening ({}=true)", JNDI_DISABLE_PROPERTY);
+                }
+                
+                // Also check for variations of JNDI plugin names
+                plugins.entrySet().removeIf(entry -> {
+                    final String name = entry.getKey().toLowerCase();
+                    final boolean isJndiRelated = name.contains("jndi");
+                    if (isJndiRelated) {
+                        LOGGER.debug("Removed JNDI-related plugin '{}' for security hardening", entry.getKey());
+                    }
+                    return isJndiRelated;
+                });
+            }
+        }
+    }
+
+    /**
+     * Creates a JNDI-aware Interpolator instance with specified lookup and plugin packages.
+     * When JNDI is disabled, filters out JNDI-related plugins from the package list.
+     * 
+     * @param lookup the primary StrLookup instance to use
+     * @param packages the list of plugin packages to scan
+     * @return a new Interpolator instance configured based on JNDI security settings
+     */
+    private StrLookup createJndiAwareInterpolatorWithLookup(final StrLookup lookup, final List<String> packages) {
+        if (jndiDisabled) {
+            LOGGER.debug("Creating JNDI-disabled Interpolator for variable resolution ({}=true)", JNDI_DISABLE_PROPERTY);
+            // Create filtered plugin package list excluding JNDI-related packages
+            final List<String> filteredPackages = filterJndiPackages(packages);
+            return new Interpolator(lookup, filteredPackages);
+        } else {
+            LOGGER.debug("Creating standard Interpolator with JNDI capability enabled");
+            return new Interpolator(lookup, packages);
+        }
+    }
+
+    /**
+     * Filters out JNDI-related packages from the plugin package list for security.
+     * 
+     * @param packages the original list of plugin packages
+     * @return a filtered list excluding JNDI-related packages
+     */
+    private List<String> filterJndiPackages(final List<String> packages) {
+        if (packages == null || packages.isEmpty()) {
+            return packages;
+        }
+        
+        final List<String> filtered = new ArrayList<>();
+        for (final String pkg : packages) {
+            if (pkg != null && !pkg.toLowerCase().contains("jndi")) {
+                filtered.add(pkg);
+            } else if (pkg != null) {
+                LOGGER.debug("Filtered out JNDI-related package '{}' for security hardening", pkg);
+            }
+        }
+        return filtered;
+    }
+
+    /**
+     * Provides administrative control over JNDI functionality at the configuration level.
+     * This method can be used by configuration parsers to set JNDI disable state
+     * based on configuration attributes.
+     * 
+     * @param disable true to disable JNDI lookups, false to enable them
+     * @deprecated This method is provided for configuration-level control but
+     *             the JNDI disable state is primarily controlled by system property
+     *             for security consistency across all configurations.
+     */
+    @Deprecated
+    protected void setJndiDisabled(final boolean disable) {
+        if (disable != jndiDisabled) {
+            LOGGER.warn("Attempt to modify JNDI disable state from {} to {} ignored. " +
+                       "JNDI disable state is controlled by system property {} for security consistency.",
+                       jndiDisabled, disable, JNDI_DISABLE_PROPERTY);
+        }
     }
 
     @Override
@@ -221,7 +393,10 @@ public abstract class AbstractConfiguration extends AbstractFilterable implement
             // LOG4J2-1920 ScriptEngineManager is not available in Android
             LOGGER.info("Cannot initialize scripting support because this JRE does not support it.", e);
         }
-        pluginManager.collectPlugins(pluginPackages);
+        
+        // Collect plugins while respecting JNDI security settings
+        collectPluginsWithJndiAwareness();
+        
         final PluginManager levelPlugins = new PluginManager(Level.CATEGORY);
         levelPlugins.collectPlugins(pluginPackages);
         final Map<String, PluginType<?>> plugins = levelPlugins.getPlugins();
@@ -536,7 +711,8 @@ public abstract class AbstractConfiguration extends AbstractFilterable implement
         } else {
             final Map<String, String> map = this.getComponent(CONTEXT_PROPERTIES);
             final StrLookup lookup = map == null ? null : new MapLookup(map);
-            subst.setVariableResolver(new Interpolator(lookup, pluginPackages));
+            // Create JNDI-aware Interpolator for variable resolution
+            subst.setVariableResolver(createJndiAwareInterpolatorWithLookup(lookup, pluginPackages));
         }
 
         boolean setLoggers = false;

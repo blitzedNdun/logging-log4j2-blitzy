@@ -51,6 +51,9 @@ public class Interpolator extends AbstractConfigurationAwareLookup {
 
     private static final String LOOKUP_KEY_JVMRUNARGS = "jvmrunargs";
 
+    /** System property to disable JNDI lookups as security hardening measure */
+    private static final String DISABLE_JNDI_PROPERTY = "log4j2.disable.jndi";
+
     private static final Logger LOGGER = StatusLogger.getLogger();
 
     private final Map<String, StrLookup> strLookupMap = new HashMap<>();
@@ -75,9 +78,17 @@ public class Interpolator extends AbstractConfigurationAwareLookup {
         final Map<String, PluginType<?>> plugins = manager.getPlugins();
 
         for (final Map.Entry<String, PluginType<?>> entry : plugins.entrySet()) {
+            final String key = entry.getKey().toLowerCase();
+            
+            // Skip JNDI lookup registration for security hardening
+            if (LOOKUP_KEY_JNDI.equals(key) && isJndiDisabled()) {
+                LOGGER.warn("JNDI lookup is disabled by system property {}=true for security hardening", DISABLE_JNDI_PROPERTY);
+                continue;
+            }
+            
             try {
                 final Class<? extends StrLookup> clazz = entry.getValue().getPluginClass().asSubclass(StrLookup.class);
-                strLookupMap.put(entry.getKey().toLowerCase(), ReflectionUtil.instantiate(clazz));
+                strLookupMap.put(key, ReflectionUtil.instantiate(clazz));
             } catch (final Throwable t) {
                 handleError(entry.getKey(), t);
             }
@@ -96,6 +107,9 @@ public class Interpolator extends AbstractConfigurationAwareLookup {
      */
     public Interpolator(final Map<String, String> properties) {
         this.defaultLookup = new MapLookup(properties == null ? new HashMap<String, String>() : properties);
+        
+        // Security hardening: Check if JNDI should be disabled (defaults to true for fail-safe)
+        
         // TODO: this ought to use the PluginManager
         strLookupMap.put("log4j", new Log4jLookup());
         strLookupMap.put("sys", new SystemPropertiesLookup());
@@ -105,13 +119,17 @@ public class Interpolator extends AbstractConfigurationAwareLookup {
         strLookupMap.put("java", new JavaLookup());
         strLookupMap.put("lower", new LowerLookup());
         strLookupMap.put("upper", new UpperLookup());
-        // JNDI
-        try {
-            // [LOG4J2-703] We might be on Android
-            strLookupMap.put(LOOKUP_KEY_JNDI,
-                Loader.newCheckedInstanceOf("org.apache.logging.log4j.core.lookup.JndiLookup", StrLookup.class));
-        } catch (final LinkageError | Exception e) {
-            handleError(LOOKUP_KEY_JNDI, e);
+        // JNDI - Security hardening: Skip JNDI lookup registration to prevent injection attacks
+        if (isJndiDisabled()) {
+            LOGGER.warn("JNDI lookup is disabled by system property {}=true for security hardening", DISABLE_JNDI_PROPERTY);
+        } else {
+            try {
+                // [LOG4J2-703] We might be on Android
+                strLookupMap.put(LOOKUP_KEY_JNDI,
+                    Loader.newCheckedInstanceOf("org.apache.logging.log4j.core.lookup.JndiLookup", StrLookup.class));
+            } catch (final LinkageError | Exception e) {
+                handleError(LOOKUP_KEY_JNDI, e);
+            }
         }
         // JMX input args
         try {
@@ -152,6 +170,16 @@ public class Interpolator extends AbstractConfigurationAwareLookup {
         } catch (final Exception | NoClassDefFoundError error) {
             handleError(LOOKUP_KEY_KUBERNETES, error);
         }
+    }
+
+    /**
+     * Checks if JNDI lookups should be disabled for security hardening.
+     * Defaults to true (disabled) as a fail-safe mechanism.
+     * 
+     * @return true if JNDI lookups should be disabled
+     */
+    private static boolean isJndiDisabled() {
+        return Boolean.parseBoolean(System.getProperty(DISABLE_JNDI_PROPERTY, "true"));
     }
 
     public Map<String, StrLookup> getStrLookupMap() {
@@ -212,6 +240,14 @@ public class Interpolator extends AbstractConfigurationAwareLookup {
         if (prefixPos >= 0) {
             final String prefix = var.substring(0, prefixPos).toLowerCase(Locale.US);
             final String name = var.substring(prefixPos + 1);
+            
+            // Security hardening: Block JNDI lookup attempts and log security warning
+            if (LOOKUP_KEY_JNDI.equals(prefix)) {
+                LOGGER.warn("SECURITY: Blocked JNDI lookup attempt for '{}'. JNDI lookups are disabled to prevent " +
+                           "remote code execution vulnerabilities. Check system property {}=true", var, DISABLE_JNDI_PROPERTY);
+                return null;
+            }
+            
             final StrLookup lookup = strLookupMap.get(prefix);
             if (lookup instanceof ConfigurationAware) {
                 ((ConfigurationAware) lookup).setConfiguration(configuration);

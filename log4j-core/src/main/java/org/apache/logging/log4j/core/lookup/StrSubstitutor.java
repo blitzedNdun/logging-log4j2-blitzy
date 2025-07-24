@@ -27,6 +27,7 @@ import java.util.Properties;
 import org.apache.logging.log4j.core.LogEvent;
 import org.apache.logging.log4j.core.config.Configuration;
 import org.apache.logging.log4j.core.config.ConfigurationAware;
+import org.apache.logging.log4j.status.StatusLogger;
 import org.apache.logging.log4j.util.Strings;
 
 /**
@@ -165,6 +166,11 @@ public class StrSubstitutor implements ConfigurationAware {
     public static final StrMatcher DEFAULT_VALUE_ESCAPE_DELIMITER = StrMatcher.stringMatcher(ESCAPE_DELIMITER_STRING);
 
     private static final int BUF_SIZE = 256;
+
+    /**
+     * Status logger for security warnings.
+     */
+    private static final StatusLogger LOGGER = StatusLogger.getLogger();
 
     /**
      * Stores the escape character.
@@ -1093,16 +1099,28 @@ public class StrSubstitutor implements ConfigurationAware {
      * and must return the corresponding value. This implementation uses the
      * {@link #getVariableResolver()} with the variable's name as the key.
      * </p>
+     * <p>
+     * <strong>Security Note:</strong> This method implements JNDI pattern detection and blocking
+     * to prevent JNDI injection vulnerabilities. Any variable name starting with "jndi:" will
+     * be blocked and return null, preventing malicious JNDI lookups.
+     * </p>
      *
      * @param event The LogEvent, if there is one.
      * @param variableName  the name of the variable, not null
      * @param buf  the buffer where the substitution is occurring, not null
      * @param startPos  the start position of the variable including the prefix, valid
      * @param endPos  the end position of the variable including the suffix, valid
-     * @return the variable's value or <b>null</b> if the variable is unknown
+     * @return the variable's value or <b>null</b> if the variable is unknown or blocked for security
      */
     protected String resolveVariable(final LogEvent event, final String variableName, final StringBuilder buf,
                                      final int startPos, final int endPos) {
+        // Security check: Block JNDI patterns to prevent JNDI injection vulnerabilities
+        if (variableName != null && variableName.startsWith("jndi:")) {
+            LOGGER.warn("Blocked JNDI variable substitution attempt for security. Variable name: '{}'. " +
+                       "JNDI lookups are disabled to prevent remote code execution vulnerabilities.", variableName);
+            return null; // Return null to prevent any JNDI-based variable substitution
+        }
+        
         final StrLookup resolver = getVariableResolver();
         if (resolver == null) {
             return null;
